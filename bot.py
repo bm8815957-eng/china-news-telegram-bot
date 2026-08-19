@@ -12,20 +12,22 @@ from telegram import Bot
 
 
 # =========================================================
-# SETTINGS
+# BOT SETTINGS
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 CHANNEL_USERNAME = "@eHTDSNB"
 
 CHECK_INTERVAL = 30 * 60  # 30 minutes
-SEEN_FILE = "seen_news.json"
 
 MAX_POSTS_PER_CHECK = 3
 
+SEEN_FILE = "seen_news.json"
+
 
 # =========================================================
-# CHINA NEWS RSS FEEDS
+# NEWS SOURCES
 # =========================================================
 
 RSS_FEEDS = [
@@ -73,33 +75,45 @@ HEADERS = {
         "(KHTML, like Gecko) "
         "Chrome/146.0 Safari/537.36"
     ),
+    "Accept": (
+        "text/html,application/xhtml+xml,"
+        "application/xml;q=0.9,image/avif,"
+        "image/webp,*/*;q=0.8"
+    ),
     "Accept-Language": "en-US,en;q=0.9",
 }
 
 
 # =========================================================
-# LOAD SEEN NEWS
+# LOAD SEEN ARTICLES
 # =========================================================
 
 def load_seen():
+
     try:
+
         with open(
             SEEN_FILE,
             "r",
             encoding="utf-8"
         ) as file:
-            return set(json.load(file))
+
+            return set(
+                json.load(file)
+            )
 
     except Exception:
+
         return set()
 
 
 # =========================================================
-# SAVE SEEN NEWS
+# SAVE SEEN ARTICLES
 # =========================================================
 
 def save_seen(seen):
-    # Keep only the latest 500 article links
+
+    # Keep database reasonably small
     recent = list(seen)[-500:]
 
     with open(
@@ -107,6 +121,7 @@ def save_seen(seen):
         "w",
         encoding="utf-8"
     ) as file:
+
         json.dump(
             recent,
             file,
@@ -125,7 +140,7 @@ def clean_text(text):
         return ""
 
     soup = BeautifulSoup(
-        text,
+        str(text),
         "html.parser"
     )
 
@@ -146,10 +161,13 @@ def clean_text(text):
 
 
 # =========================================================
-# CHECK IF ARTICLE IS ABOUT CHINA
+# CHINA NEWS FILTER
 # =========================================================
 
-def is_china_news(title, summary):
+def is_china_news(
+    title,
+    summary
+):
 
     text = (
         title
@@ -160,13 +178,618 @@ def is_china_news(title, summary):
     for keyword in CHINA_KEYWORDS:
 
         if keyword in text:
+
             return True
 
     return False
 
 
 # =========================================================
-# GET RSS NEWS
+# CONVERT IMAGE URL TO FULL URL
+# =========================================================
+
+def normalize_image_url(
+    image_url,
+    article_url
+):
+
+    if not image_url:
+        return None
+
+    image_url = str(
+        image_url
+    ).strip()
+
+    # Example:
+    # //www.chinadaily.com.cn/image.jpg
+
+    if image_url.startswith("//"):
+
+        return (
+            "https:"
+            + image_url
+        )
+
+    # Example:
+    # /images/news.jpg
+
+    if image_url.startswith("/"):
+
+        return urljoin(
+            article_url,
+            image_url
+        )
+
+    # Example:
+    # images/news.jpg
+
+    if not image_url.startswith(
+        (
+            "http://",
+            "https://"
+        )
+    ):
+
+        return urljoin(
+            article_url,
+            image_url
+        )
+
+    return image_url
+
+
+# =========================================================
+# CHECK IF IMAGE URL LOOKS LIKE A LOGO/PLACEHOLDER
+# =========================================================
+
+def looks_like_bad_image(
+    image_url
+):
+
+    lower = image_url.lower()
+
+    blocked_words = [
+        "logo",
+        "logos",
+        "favicon",
+        "avatar",
+        "icon",
+        "icons",
+        "placeholder",
+        "default-image",
+        "default_image",
+        "defaultimage",
+        "no-image",
+        "no_image",
+        "noimage",
+        "loading",
+        "spinner",
+        "sprite",
+        "qrcode",
+        "qr-code",
+        "wechat",
+        "share",
+    ]
+
+    for word in blocked_words:
+
+        if word in lower:
+
+            return True
+
+    return False
+
+
+# =========================================================
+# GET IMAGE URL FROM RSS ENTRY
+# =========================================================
+
+def get_rss_image_url(
+    entry,
+    article_url
+):
+
+    candidates = []
+
+    # -----------------------------------------------------
+    # media_content
+    # -----------------------------------------------------
+
+    media_content = entry.get(
+        "media_content"
+    )
+
+    if media_content:
+
+        for media in media_content:
+
+            if isinstance(
+                media,
+                dict
+            ):
+
+                image_url = media.get(
+                    "url"
+                )
+
+                if image_url:
+
+                    candidates.append(
+                        image_url
+                    )
+
+    # -----------------------------------------------------
+    # media_thumbnail
+    # -----------------------------------------------------
+
+    media_thumbnail = entry.get(
+        "media_thumbnail"
+    )
+
+    if media_thumbnail:
+
+        for media in media_thumbnail:
+
+            if isinstance(
+                media,
+                dict
+            ):
+
+                image_url = media.get(
+                    "url"
+                )
+
+                if image_url:
+
+                    candidates.append(
+                        image_url
+                    )
+
+    # -----------------------------------------------------
+    # Enclosures
+    # -----------------------------------------------------
+
+    enclosures = entry.get(
+        "enclosures"
+    )
+
+    if enclosures:
+
+        for enclosure in enclosures:
+
+            if isinstance(
+                enclosure,
+                dict
+            ):
+
+                image_url = enclosure.get(
+                    "href"
+                ) or enclosure.get(
+                    "url"
+                )
+
+                media_type = enclosure.get(
+                    "type",
+                    ""
+                )
+
+                if image_url:
+
+                    if (
+                        not media_type
+                        or media_type.startswith(
+                            "image/"
+                        )
+                    ):
+
+                        candidates.append(
+                            image_url
+                        )
+
+    # -----------------------------------------------------
+    # Process candidates
+    # -----------------------------------------------------
+
+    for image_url in candidates:
+
+        image_url = normalize_image_url(
+            image_url,
+            article_url
+        )
+
+        if not image_url:
+
+            continue
+
+        if looks_like_bad_image(
+            image_url
+        ):
+
+            print(
+                "⏭️ RSS image rejected:"
+                f" {image_url}"
+            )
+
+            continue
+
+        print(
+            "🖼️ RSS image candidate:"
+            f" {image_url}"
+        )
+
+        return image_url
+
+    return None
+
+
+# =========================================================
+# GET IMAGE FROM ARTICLE OG TAGS
+# =========================================================
+
+def get_og_image_url(
+    article_url
+):
+
+    try:
+
+        response = requests.get(
+            article_url,
+            headers=HEADERS,
+            timeout=20
+        )
+
+        response.raise_for_status()
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+        # -------------------------------------------------
+        # OpenGraph image
+        # -------------------------------------------------
+
+        og_images = soup.find_all(
+            "meta",
+            property="og:image"
+        )
+
+        for meta in og_images:
+
+            image_url = meta.get(
+                "content"
+            )
+
+            if not image_url:
+
+                continue
+
+            image_url = normalize_image_url(
+                image_url,
+                article_url
+            )
+
+            if not image_url:
+
+                continue
+
+            if looks_like_bad_image(
+                image_url
+            ):
+
+                print(
+                    "⏭️ OG image rejected:"
+                    f" {image_url}"
+                )
+
+                continue
+
+            print(
+                "🖼️ OG image candidate:"
+                f" {image_url}"
+            )
+
+            return image_url
+
+        # -------------------------------------------------
+        # Twitter image
+        # -------------------------------------------------
+
+        twitter_images = soup.find_all(
+            "meta",
+            attrs={
+                "name": "twitter:image"
+            }
+        )
+
+        for meta in twitter_images:
+
+            image_url = meta.get(
+                "content"
+            )
+
+            if not image_url:
+
+                continue
+
+            image_url = normalize_image_url(
+                image_url,
+                article_url
+            )
+
+            if not image_url:
+
+                continue
+
+            if looks_like_bad_image(
+                image_url
+            ):
+
+                print(
+                    "⏭️ Twitter image rejected:"
+                    f" {image_url}"
+                )
+
+                continue
+
+            print(
+                "🖼️ Twitter image candidate:"
+                f" {image_url}"
+            )
+
+            return image_url
+
+    except Exception as error:
+
+        print(
+            "⚠️ Could not inspect article:"
+            f" {error}"
+        )
+
+    return None
+
+
+# =========================================================
+# DOWNLOAD AND VERIFY IMAGE
+# =========================================================
+
+def download_and_verify_image(
+    image_url
+):
+
+    try:
+
+        print(
+            "⬇️ Downloading image:"
+            f" {image_url}"
+        )
+
+        response = requests.get(
+            image_url,
+            headers=HEADERS,
+            timeout=25
+        )
+
+        response.raise_for_status()
+
+        content_type = (
+            response
+            .headers
+            .get(
+                "content-type",
+                ""
+            )
+            .lower()
+        )
+
+        image_data = response.content
+
+        # -------------------------------------------------
+        # Check Content-Type
+        # -------------------------------------------------
+
+        if not content_type.startswith(
+            "image/"
+        ):
+
+            print(
+                "⏭️ Rejected:"
+                " server did not return an image."
+            )
+
+            return None
+
+        # -------------------------------------------------
+        # Reject very small files
+        # -------------------------------------------------
+
+        if len(image_data) < 10000:
+
+            print(
+                "⏭️ Rejected:"
+                " image is too small."
+            )
+
+            return None
+
+        # -------------------------------------------------
+        # Check actual image signatures
+        # -------------------------------------------------
+
+        is_jpeg = (
+            image_data[:3]
+            == b"\xff\xd8\xff"
+        )
+
+        is_png = (
+            image_data[:8]
+            == b"\x89PNG\r\n\x1a\n"
+        )
+
+        is_gif = (
+            image_data[:6]
+            in (
+                b"GIF87a",
+                b"GIF89a"
+            )
+        )
+
+        is_webp = (
+            image_data[:4]
+            == b"RIFF"
+            and image_data[8:12]
+            == b"WEBP"
+        )
+
+        if not (
+            is_jpeg
+            or is_png
+            or is_gif
+            or is_webp
+        ):
+
+            print(
+                "⏭️ Rejected:"
+                " file is not a recognized image."
+            )
+
+            return None
+
+        print(
+            "✅ Real image verified."
+        )
+
+        return image_data
+
+    except Exception as error:
+
+        print(
+            "⚠️ Image download failed:"
+            f" {error}"
+        )
+
+        return None
+
+
+# =========================================================
+# FIND REAL ARTICLE IMAGE
+# =========================================================
+
+def find_real_article_image(
+    article
+):
+
+    article_url = article["link"]
+
+    # -----------------------------------------------------
+    # FIRST: RSS IMAGE
+    # -----------------------------------------------------
+
+    rss_image = get_rss_image_url(
+        article.get(
+            "entry",
+            {}
+        ),
+        article_url
+    )
+
+    if rss_image:
+
+        image_data = download_and_verify_image(
+            rss_image
+        )
+
+        if image_data:
+
+            return image_data
+
+    # -----------------------------------------------------
+    # SECOND: OG IMAGE
+    # -----------------------------------------------------
+
+    og_image = get_og_image_url(
+        article_url
+    )
+
+    if og_image:
+
+        image_data = download_and_verify_image(
+            og_image
+        )
+
+        if image_data:
+
+            return image_data
+
+    # -----------------------------------------------------
+    # IMPORTANT:
+    #
+    # We DO NOT scan random <img> tags.
+    #
+    # This prevents the China Daily logo,
+    # X placeholders and other webpage graphics
+    # from being used as news photos.
+    # -----------------------------------------------------
+
+    print(
+        "❌ No trusted article image found."
+    )
+
+    return None
+
+
+# =========================================================
+# CREATE TELEGRAM CAPTION
+# =========================================================
+
+def make_caption(
+    article
+):
+
+    title = clean_text(
+        article["title"]
+    )
+
+    summary = clean_text(
+        article["summary"]
+    )
+
+    # Limit summary length
+    if len(summary) > 500:
+
+        summary = (
+            summary[:500]
+            .rsplit(
+                " ",
+                1
+            )[0]
+            + "..."
+        )
+
+    # If no summary exists
+    if not summary:
+
+        summary = (
+            "中国最新消息受到关注，"
+            "相关情况正在持续发展。"
+        )
+
+    caption = (
+        "🇨🇳 <b>中国新闻</b>\n\n"
+        f"📰 <b>{html.escape(title)}</b>\n\n"
+        f"{html.escape(summary)}\n\n"
+        "━━━━━━━━━━━━━━\n"
+        "🔗 <a href=\""
+        f"{html.escape(article['link'])}"
+        "\">阅读原文</a>\n\n"
+        "#中国新闻 #中国 #ChinaNews"
+    )
+
+    return caption
+
+
+# =========================================================
+# GET NEWS
 # =========================================================
 
 def get_news():
@@ -178,11 +801,17 @@ def get_news():
         try:
 
             print(
-                f"📡 Reading feed: {feed_url}"
+                f"📡 Reading:"
+                f" {feed_url}"
             )
 
             feed = feedparser.parse(
                 feed_url
+            )
+
+            print(
+                f"📥 Feed entries:"
+                f" {len(feed.entries)}"
             )
 
             for entry in feed.entries[:30]:
@@ -207,6 +836,7 @@ def get_news():
                 )
 
                 if not title or not link:
+
                     continue
 
                 if not is_china_news(
@@ -215,361 +845,29 @@ def get_news():
                 ):
 
                     print(
-                        f"⏭️ Not China news: "
-                        f"{title}"
+                        "⏭️ Skipping non-China:"
+                        f" {title}"
                     )
 
                     continue
 
-                article = {
-                    "title": title,
-                    "link": link,
-                    "summary": summary
-                }
-
                 articles.append(
-                    article
+                    {
+                        "title": title,
+                        "link": link,
+                        "summary": summary,
+                        "entry": entry,
+                    }
                 )
 
         except Exception as error:
 
             print(
-                f"❌ RSS error: {error}"
+                "❌ RSS error:"
+                f" {error}"
             )
 
     return articles
-
-
-# =========================================================
-# FIND ARTICLE IMAGE
-# =========================================================
-
-def find_article_image(article_url):
-
-    try:
-
-        print(
-            f"🔎 Looking for image: "
-            f"{article_url}"
-        )
-
-        response = requests.get(
-            article_url,
-            headers=HEADERS,
-            timeout=20
-        )
-
-        response.raise_for_status()
-
-        soup = BeautifulSoup(
-            response.text,
-            "html.parser"
-        )
-
-        candidates = []
-
-        # -------------------------------------------------
-        # OpenGraph image
-        # -------------------------------------------------
-
-        for meta in soup.find_all(
-            "meta",
-            property="og:image"
-        ):
-
-            image = meta.get(
-                "content"
-            )
-
-            if image:
-                candidates.append(
-                    image
-                )
-
-        # -------------------------------------------------
-        # Twitter image
-        # -------------------------------------------------
-
-        for meta in soup.find_all(
-            "meta",
-            attrs={
-                "name": "twitter:image"
-            }
-        ):
-
-            image = meta.get(
-                "content"
-            )
-
-            if image:
-                candidates.append(
-                    image
-                )
-
-        # -------------------------------------------------
-        # Other Twitter card format
-        # -------------------------------------------------
-
-        for meta in soup.find_all(
-            "meta",
-            attrs={
-                "property": "twitter:image"
-            }
-        ):
-
-            image = meta.get(
-                "content"
-            )
-
-            if image:
-                candidates.append(
-                    image
-                )
-
-        # -------------------------------------------------
-        # Article images
-        # -------------------------------------------------
-
-        for img in soup.find_all(
-            "img"
-        ):
-
-            image = (
-                img.get("src")
-                or img.get("data-src")
-                or img.get("data-original")
-                or img.get("data-lazy-src")
-            )
-
-            if image:
-                candidates.append(
-                    image
-                )
-
-        # -------------------------------------------------
-        # Process candidates
-        # -------------------------------------------------
-
-        for image_url in candidates:
-
-            if not image_url:
-                continue
-
-            image_url = image_url.strip()
-
-            # ---------------------------------------------
-            # Protocol-relative URL
-            # Example:
-            # //www.example.com/image.jpg
-            # ---------------------------------------------
-
-            if image_url.startswith("//"):
-
-                image_url = (
-                    "https:"
-                    + image_url
-                )
-
-            # ---------------------------------------------
-            # Relative URL
-            # ---------------------------------------------
-
-            elif image_url.startswith("/"):
-
-                image_url = urljoin(
-                    article_url,
-                    image_url
-                )
-
-            # ---------------------------------------------
-            # Other relative URL
-            # ---------------------------------------------
-
-            elif not image_url.startswith(
-                (
-                    "http://",
-                    "https://"
-                )
-            ):
-
-                image_url = urljoin(
-                    article_url,
-                    image_url
-                )
-
-            # ---------------------------------------------
-            # Ignore bad URLs
-            # ---------------------------------------------
-
-            if not image_url.startswith(
-                (
-                    "http://",
-                    "https://"
-                )
-            ):
-                continue
-
-            lower_url = image_url.lower()
-
-            # ---------------------------------------------
-            # Reject logos/icons
-            # ---------------------------------------------
-
-            blocked_words = [
-                "logo",
-                "favicon",
-                "avatar",
-                "icon",
-                "placeholder",
-                "sprite",
-                "qrcode",
-                "qr-code",
-            ]
-
-            if any(
-                word in lower_url
-                for word in blocked_words
-            ):
-
-                print(
-                    f"⏭️ Ignoring logo/icon: "
-                    f"{image_url}"
-                )
-
-                continue
-
-            print(
-                f"🖼️ Image candidate: "
-                f"{image_url}"
-            )
-
-            # ---------------------------------------------
-            # Verify image
-            # ---------------------------------------------
-
-            try:
-
-                image_response = requests.get(
-                    image_url,
-                    headers=HEADERS,
-                    timeout=20
-                )
-
-                image_response.raise_for_status()
-
-                content_type = (
-                    image_response
-                    .headers
-                    .get(
-                        "content-type",
-                        ""
-                    )
-                    .lower()
-                )
-
-                if not content_type.startswith(
-                    "image/"
-                ):
-
-                    print(
-                        "⏭️ Not an image."
-                    )
-
-                    continue
-
-                image_data = (
-                    image_response.content
-                )
-
-                # Reject tiny images
-                if len(image_data) < 10000:
-
-                    print(
-                        "⏭️ Image too small."
-                    )
-
-                    continue
-
-                print(
-                    "✅ Valid news image found."
-                )
-
-                return image_data
-
-            except Exception as error:
-
-                print(
-                    f"⚠️ Image candidate failed: "
-                    f"{error}"
-                )
-
-        print(
-            "❌ No usable news image found."
-        )
-
-        return None
-
-    except Exception as error:
-
-        print(
-            f"❌ Article image error: "
-            f"{error}"
-        )
-
-        return None
-
-
-# =========================================================
-# CREATE TELEGRAM CAPTION
-# =========================================================
-
-def make_caption(article):
-
-    title = article["title"]
-    summary = article["summary"]
-
-    # Clean title
-    title = clean_text(
-        title
-    )
-
-    # Clean summary
-    summary = clean_text(
-        summary
-    )
-
-    # Limit summary
-    if len(summary) > 500:
-
-        summary = (
-            summary[:500]
-            .rsplit(
-                " ",
-                1
-            )[0]
-            + "..."
-        )
-
-    # If RSS doesn't provide summary
-    if not summary:
-
-        summary = (
-            "中国最新消息受到关注，"
-            "相关情况正在持续发展。"
-        )
-
-    caption = (
-        "🇨🇳 <b>中国新闻</b>\n\n"
-        f"📰 <b>{html.escape(title)}</b>\n\n"
-        f"{html.escape(summary)}\n\n"
-        "━━━━━━━━━━━━━━\n"
-        "🔗 <a href=\""
-        f"{html.escape(article['link'])}"
-        "\">阅读原文</a>\n\n"
-        "#中国新闻 #中国 #ChinaNews"
-    )
-
-    return caption
 
 
 # =========================================================
@@ -583,28 +881,27 @@ async def post_article(
 
     print(
         "\n"
-        "================================"
+        "========================================"
     )
 
     print(
-        f"📰 Article: "
-        f"{article['title']}"
+        f"📰 {article['title']}"
     )
 
     print(
-        "================================"
+        "========================================"
     )
 
-    # Image REQUIRED
-    image_data = find_article_image(
-        article["link"]
+    # Image is REQUIRED
+    image_data = find_real_article_image(
+        article
     )
 
     if not image_data:
 
         print(
-            "⏭️ SKIPPED — "
-            "article has no usable image."
+            "⏭️ SKIPPED:"
+            " no genuine news image."
         )
 
         return False
@@ -623,7 +920,7 @@ async def post_article(
         )
 
         print(
-            "✅ POSTED WITH IMAGE!"
+            "✅ POSTED WITH REAL IMAGE!"
         )
 
         return True
@@ -631,8 +928,8 @@ async def post_article(
     except Exception as error:
 
         print(
-            f"❌ Telegram posting error: "
-            f"{error}"
+            "❌ Telegram error:"
+            f" {error}"
         )
 
         return False
@@ -647,8 +944,8 @@ async def main():
     if not BOT_TOKEN:
 
         raise ValueError(
-            "BOT_TOKEN environment variable "
-            "is missing."
+            "BOT_TOKEN is missing."
+            " Add BOT_TOKEN in Railway Variables."
         )
 
     bot = Bot(
@@ -658,40 +955,48 @@ async def main():
     seen = load_seen()
 
     print(
-        "================================"
+        "========================================"
     )
 
     print(
-        "🤖 China News Bot V2"
+        "🤖 CHINA NEWS BOT V3"
     )
 
     print(
-        "================================"
+        "========================================"
     )
 
     print(
-        f"📢 Channel: "
-        f"{CHANNEL_USERNAME}"
+        f"📢 Channel:"
+        f" {CHANNEL_USERNAME}"
     )
 
     print(
-        "🇨🇳 China-only: ENABLED"
+        "🇨🇳 China-only: ON"
     )
 
     print(
-        "🖼️ Image-required: ENABLED"
+        "🖼️ Real-image-only: ON"
     )
 
     print(
-        "🚫 Duplicate protection: ENABLED"
+        "🚫 Random webpage images: OFF"
     )
 
     print(
-        "⏰ Check interval: 30 minutes"
+        "🚫 Logo/placeholder images: OFF"
     )
 
     print(
-        "================================"
+        "🔄 Duplicate protection: ON"
+    )
+
+    print(
+        "⏰ Checking every 30 minutes"
+    )
+
+    print(
+        "========================================"
     )
 
     while True:
@@ -699,14 +1004,14 @@ async def main():
         try:
 
             print(
-                "\n🔄 Checking for new news..."
+                "\n🔄 Checking for news..."
             )
 
             articles = get_news()
 
             print(
-                f"🇨🇳 China articles found: "
-                f"{len(articles)}"
+                f"🇨🇳 China articles found:"
+                f" {len(articles)}"
             )
 
             new_articles = []
@@ -718,8 +1023,8 @@ async def main():
                 if article_id in seen:
 
                     print(
-                        f"♻️ Already posted: "
-                        f"{article['title']}"
+                        f"♻️ Already processed:"
+                        f" {article['title']}"
                     )
 
                     continue
@@ -729,15 +1034,15 @@ async def main():
                 )
 
             print(
-                f"🆕 New articles: "
-                f"{len(new_articles)}"
+                f"🆕 New articles:"
+                f" {len(new_articles)}"
             )
 
-            posted_count = 0
+            posted = 0
 
             for article in new_articles:
 
-                if posted_count >= MAX_POSTS_PER_CHECK:
+                if posted >= MAX_POSTS_PER_CHECK:
 
                     break
 
@@ -746,28 +1051,31 @@ async def main():
                     article
                 )
 
-                # IMPORTANT:
-                # Mark article as seen even when skipped
-                # because it has no image.
-                seen.add(
-                    article["link"]
-                )
-
-                save_seen(
-                    seen
-                )
-
+                # Only mark it as seen after
+                # a successful post.
+                #
+                # This means articles without an
+                # image can be retried later if
+                # the source adds an image.
                 if success:
 
-                    posted_count += 1
+                    seen.add(
+                        article["link"]
+                    )
+
+                    save_seen(
+                        seen
+                    )
+
+                    posted += 1
 
                     await asyncio.sleep(
                         10
                     )
 
             print(
-                f"\n✅ Posted this round: "
-                f"{posted_count}"
+                f"\n📢 Posted this round:"
+                f" {posted}"
             )
 
             print(
@@ -781,8 +1089,8 @@ async def main():
         except Exception as error:
 
             print(
-                f"\n❌ MAIN LOOP ERROR: "
-                f"{error}"
+                "\n❌ Main loop error:"
+                f" {error}"
             )
 
             print(
